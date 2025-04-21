@@ -32,7 +32,7 @@ cat > "$INSTALL_PATH/$ALIAS_CMD" << 'EOF'
 # gitterbugs: Clone a GitHub repo and output a pretty tree view with file sizes
 
 REPO_URL="$1"
-[ -z "$REPO_URL" ] && { echo "Usage: gitterbugs <GitHub repo URL>"; exit 1; }
+[ -z "$REPO_URL" ] && { echo "Usage: gbgs <GitHub repo URL>"; exit 1; }
 
 REPO_NAME=$(basename -s .git "$REPO_URL")
 TARGET_DIR="$REPO_NAME"
@@ -101,5 +101,5 @@ if [[ ":$PATH:" != *":$INSTALL_PATH:"* ]]; then
   echo
 else
   echo "[✓] Installed. Try:"
-  echo "gitterbugs https://github.com/torvalds/linux"
+  echo "gbgs curl -fsSL https://github.com/amosWeiskopf/gitterbugs"
 fi
