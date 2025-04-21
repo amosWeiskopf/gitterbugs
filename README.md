@@ -1,5 +1,5 @@
 # gitterbugs
-A fast tree builder for any public GitHub repo via shell
+A fast tree builder for any public GitHub repo via the linux shell
 
 > `gitterbugs` (gbgs) clones, analyzes and renders a beautiful, readable and size-annotated tree of any GitHub repository in seconds.
 
