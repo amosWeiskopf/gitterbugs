@@ -3,25 +3,7 @@ A fast tree builder for any public GitHub repo via the linux shell
 
 > `gitterbugs` (gbgs) clones, analyzes and renders a beautiful, readable and size-annotated tree of any GitHub repository in seconds.
 
----
-
-## What It Does
-
-`gitterbugs` turns this:
-
-```
-git clone https://github.com/torvalds/linux.git
-cd linux
-tree
-```
-
-...into a single elegant command:
-
-```
-gbgs https://github.com/torvalds/linux
-```
-
-And produces:
+`gbgs https://github.com/torvalds/linux` produces:
 
 ```
 linux/
