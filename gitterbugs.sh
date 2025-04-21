@@ -1,17 +1,32 @@
 #!/bin/bash
 
-# gitterbugs.sh: install the `gitterbugs` command for pretty tree printing of GitHub repos
-
 set -e
 
 INSTALL_PATH="$HOME/.local/bin"
 ALIAS_CMD="gitterbugs"
 
+echo "[+] Checking dependencies..."
+
+install_if_missing() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "[-] Missing '$1' – installing..."
+    sudo apt-get update -qq
+    sudo apt-get install -y "$2"
+  else
+    echo "[✓] $1 is installed."
+  fi
+}
+
+install_if_missing git git
+install_if_missing curl curl
+install_if_missing awk gawk
+install_if_missing findutils findutils
+install_if_missing stat coreutils
+
 mkdir -p "$INSTALL_PATH"
 
-echo "🐞 Installing gitterbugs to $INSTALL_PATH..."
+echo "[+] Installing gitterbugs to $INSTALL_PATH..."
 
-# Write the main tool
 cat > "$INSTALL_PATH/$ALIAS_CMD" << 'EOF'
 #!/bin/bash
 # gitterbugs: Clone a GitHub repo and output a pretty tree view with file sizes
@@ -74,16 +89,17 @@ awk '
 
 cd ..
 rm all_paths.txt
-echo "✅ Pretty tree with sizes saved to $OUTPUT_FILE"
+echo "Tree saved to $OUTPUT_FILE"
 EOF
 
 chmod +x "$INSTALL_PATH/$ALIAS_CMD"
 
-# Suggest adding to PATH
 if [[ ":$PATH:" != *":$INSTALL_PATH:"* ]]; then
-  echo "🔧 Add this to your shell config (e.g. ~/.bashrc or ~/.zshrc):"
+  echo
+  echo "[!] Add this to your shell config (e.g. ~/.bashrc or ~/.zshrc):"
   echo "export PATH=\"\$PATH:$INSTALL_PATH\""
+  echo
 else
-  echo "✅ Installed. Try:"
-  echo "$ALIAS_CMD https://github.com/amosWeiskopf/gitterbugs"
+  echo "[✓] Installed. Try:"
+  echo "gitterbugs https://github.com/torvalds/linux"
 fi
