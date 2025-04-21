@@ -3,7 +3,7 @@
 set -e
 
 INSTALL_PATH="$HOME/.local/bin"
-ALIAS_CMD="gitterbugs"
+ALIAS_CMD="gbgs"
 
 echo "[+] Checking dependencies..."
 
