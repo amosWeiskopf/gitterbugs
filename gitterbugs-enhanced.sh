@@ -4,6 +4,7 @@
 
 set -e
 
+
 VERSION="2.0.0"
 SCRIPT_NAME=$(basename "$0")
 
@@ -534,8 +535,13 @@ generate_tree() {
         # Build tree structure
         for (i = 0; i < path_count; i++) {
             path = substr(paths[i], base_len + 2)
-            split(path, parts, "/")
-            depth = length(parts) - 1
+            # Remove leading slash if present
+            if (substr(path, 1, 1) == "/") {
+                path = substr(path, 2)
+            }
+            n_parts = split(path, parts, "/")
+            depth = n_parts - 1
+            if (depth < 0) depth = 0
             
             # Build indent
             indent = ""
@@ -544,9 +550,12 @@ generate_tree() {
                 has_sibling = 0
                 for (k = i + 1; k < path_count; k++) {
                     other_path = substr(paths[k], base_len + 2)
-                    split(other_path, other_parts, "/")
-                    if (length(other_parts) > j && other_parts[j+1] == parts[j+1]) {
-                        if (length(other_parts) == j + 2) {
+                    if (substr(other_path, 1, 1) == "/") {
+                        other_path = substr(other_path, 2)
+                    }
+                    n_other = split(other_path, other_parts, "/")
+                    if (n_other > j && other_parts[j+1] == parts[j+1]) {
+                        if (n_other == j + 2) {
                             has_sibling = 1
                             break
                         }
@@ -563,8 +572,11 @@ generate_tree() {
             is_last = 1
             for (k = i + 1; k < path_count; k++) {
                 other_path = substr(paths[k], base_len + 2)
-                split(other_path, other_parts, "/")
-                if (length(other_parts) == length(parts) && 
+                if (substr(other_path, 1, 1) == "/") {
+                    other_path = substr(other_path, 2)
+                }
+                n_other_parts = split(other_path, other_parts, "/")
+                if (n_other_parts == n_parts && 
                     other_parts[depth] == parts[depth]) {
                     is_last = 0
                     break
@@ -592,7 +604,7 @@ generate_tree() {
             if (show_icons == "true" && icons[i] != "") {
                 output = output icons[i] " "
             }
-            output = output color parts[length(parts)] c_reset
+            output = output color parts[n_parts] c_reset
             
             if (types[i] == "dir") {
                 output = output "/"
