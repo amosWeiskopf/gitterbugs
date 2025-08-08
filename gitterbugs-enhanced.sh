@@ -1,11 +1,11 @@
 #!/bin/bash
 # gitterbugs-enhanced: Advanced GitHub repository tree visualizer with 10x features
-# Version: 2.0.0
+# Version: 2.1.0
 
 set -e
+set -o pipefail
 
-
-VERSION="2.0.0"
+VERSION="2.1.0"
 SCRIPT_NAME=$(basename "$0")
 
 # Default configuration
@@ -14,6 +14,16 @@ DEFAULT_FORMAT="tree"
 DEFAULT_COLOR="auto"
 CACHE_DIR="$HOME/.cache/gitterbugs"
 CONFIG_FILE="$HOME/.config/gitterbugs/config"
+
+# Error codes
+E_SUCCESS=0
+E_INVALID_ARGS=1
+E_INVALID_URL=2
+E_NETWORK_ERROR=3
+E_GIT_ERROR=4
+E_PERMISSION_ERROR=5
+E_DEPENDENCY_ERROR=6
+E_UNKNOWN_ERROR=99
 
 # Color codes
 if [[ -t 1 ]] && [[ "${NO_COLOR:-}" != "1" ]]; then
@@ -27,9 +37,13 @@ if [[ -t 1 ]] && [[ "${NO_COLOR:-}" != "1" ]]; then
     C_CODE='\033[1;33m'     # Yellow for code
     C_SIZE='\033[0;90m'     # Gray for sizes
     C_TREE='\033[0;90m'     # Gray for tree lines
+    C_ERROR='\033[1;31m'    # Red for errors
+    C_WARN='\033[1;33m'     # Yellow for warnings
+    C_SUCCESS='\033[1;32m'  # Green for success
 else
     C_RESET='' C_BOLD='' C_DIR='' C_EXEC='' C_LINK='' 
     C_ARCHIVE='' C_IMAGE='' C_CODE='' C_SIZE='' C_TREE=''
+    C_ERROR='' C_WARN='' C_SUCCESS=''
 fi
 
 # File type patterns
@@ -57,6 +71,100 @@ declare -A FILE_ICONS=(
     ["link"]="🔗"
     ["default"]="📄"
 )
+
+# Error handling functions
+error() {
+    echo -e "${C_ERROR}Error: $1${C_RESET}" >&2
+}
+
+warn() {
+    echo -e "${C_WARN}Warning: $1${C_RESET}" >&2
+}
+
+success() {
+    echo -e "${C_SUCCESS}✓ $1${C_RESET}" >&2
+}
+
+die() {
+    local exit_code=${2:-$E_UNKNOWN_ERROR}
+    error "$1"
+    exit "$exit_code"
+}
+
+# Cleanup function
+cleanup() {
+    local exit_code=$?
+    if [[ -n "${TMP_DIR:-}" ]] && [[ -d "$TMP_DIR" ]]; then
+        rm -rf "$TMP_DIR" 2>/dev/null || true
+    fi
+    exit $exit_code
+}
+
+trap cleanup EXIT INT TERM
+
+# Check dependencies
+check_dependencies() {
+    local missing_deps=()
+    local optional_deps=()
+    
+    # Required dependencies
+    for cmd in git find awk stat; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_deps+=("$cmd")
+        fi
+    done
+    
+    # Optional dependencies
+    for cmd in bc du; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            optional_deps+=("$cmd")
+        fi
+    done
+    
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        error "Missing required dependencies: ${missing_deps[*]}"
+        echo "Please install them using your package manager (e.g., apt-get, yum, brew)" >&2
+        die "Cannot continue without required dependencies" $E_DEPENDENCY_ERROR
+    fi
+    
+    if [[ ${#optional_deps[@]} -gt 0 ]]; then
+        warn "Missing optional dependencies: ${optional_deps[*]}"
+        warn "Some features may be limited"
+    fi
+}
+
+# Validate GitHub URL
+validate_github_url() {
+    local url=$1
+    
+    # Basic URL validation
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        die "Invalid URL: must start with http:// or https://" $E_INVALID_URL
+    fi
+    
+    # GitHub URL patterns
+    if [[ ! "$url" =~ github\.com/[^/]+/[^/]+ ]]; then
+        die "Invalid GitHub URL: expected format https://github.com/owner/repo" $E_INVALID_URL
+    fi
+    
+    # Extract owner and repo
+    local owner_repo=$(echo "$url" | grep -oE 'github\.com/[^/]+/[^/]+' | cut -d'/' -f2-)
+    if [[ -z "$owner_repo" ]]; then
+        die "Could not extract repository information from URL" $E_INVALID_URL
+    fi
+    
+    echo "$owner_repo"
+}
+
+# Check network connectivity
+check_network() {
+    if ! curl -s --head --max-time 5 https://github.com >/dev/null 2>&1; then
+        warn "Cannot reach GitHub. Check your internet connection."
+        warn "If behind a proxy, set HTTP_PROXY and HTTPS_PROXY environment variables."
+        return 1
+    fi
+    return 0
+}
 
 usage() {
     cat << EOF
@@ -107,6 +215,12 @@ ${C_BOLD}EXAMPLES:${C_RESET}
     # Multiple filters and sorting
     $SCRIPT_NAME --type code --exclude "*test*" --sort size --reverse https://github.com/user/repo
 
+${C_BOLD}TROUBLESHOOTING:${C_RESET}
+    - Network issues: Check internet connection and proxy settings
+    - Permission denied: Ensure you have write access to cache directory
+    - Private repos: Use --auth with a GitHub personal access token
+    - Large repos: Use --depth to limit traversal or --cache for repeated runs
+
 ${C_BOLD}CONFIGURATION:${C_RESET}
     Config file: $CONFIG_FILE
     Cache directory: $CACHE_DIR
@@ -115,6 +229,8 @@ ${C_BOLD}ENVIRONMENT VARIABLES:${C_RESET}
     NO_COLOR              Disable colored output
     GITHUB_TOKEN          GitHub authentication token
     GITTERBUGS_CACHE_DIR  Custom cache directory
+    HTTP_PROXY            HTTP proxy server
+    HTTPS_PROXY           HTTPS proxy server
 
 EOF
 }
@@ -149,10 +265,16 @@ parse_args() {
         case $1 in
             -d|--depth)
                 DEPTH="$2"
+                if ! [[ "$DEPTH" =~ ^[0-9]+$ ]]; then
+                    die "Invalid depth: must be a positive number" $E_INVALID_ARGS
+                fi
                 shift 2
                 ;;
             -f|--format)
                 FORMAT="$2"
+                if [[ ! "$FORMAT" =~ ^(tree|json|markdown|csv)$ ]]; then
+                    die "Invalid format: must be tree, json, markdown, or csv" $E_INVALID_ARGS
+                fi
                 shift 2
                 ;;
             -o|--output)
@@ -161,6 +283,9 @@ parse_args() {
                 ;;
             -c|--color)
                 COLOR="$2"
+                if [[ ! "$COLOR" =~ ^(always|never|auto)$ ]]; then
+                    die "Invalid color option: must be always, never, or auto" $E_INVALID_ARGS
+                fi
                 shift 2
                 ;;
             --no-size)
@@ -189,6 +314,9 @@ parse_args() {
                 ;;
             --type)
                 TYPE_FILTER="$2"
+                if [[ -z "${FILE_TYPES[$TYPE_FILTER]}" ]]; then
+                    die "Invalid file type: $TYPE_FILTER. Valid types: ${!FILE_TYPES[*]}" $E_INVALID_ARGS
+                fi
                 shift 2
                 ;;
             --show-hidden)
@@ -201,6 +329,9 @@ parse_args() {
                 ;;
             --sort)
                 SORT_BY="$2"
+                if [[ ! "$SORT_BY" =~ ^(name|size|type|date)$ ]]; then
+                    die "Invalid sort field: must be name, size, type, or date" $E_INVALID_ARGS
+                fi
                 shift 2
                 ;;
             --reverse)
@@ -244,9 +375,7 @@ parse_args() {
                 exit 0
                 ;;
             -*)
-                echo "Unknown option: $1" >&2
-                usage
-                exit 1
+                die "Unknown option: $1\nUse --help for usage information" $E_INVALID_ARGS
                 ;;
             *)
                 REPO_URL="$1"
@@ -257,9 +386,9 @@ parse_args() {
 
     # Validate arguments
     if [[ -z "${REPO_URL:-}" ]]; then
-        echo "Error: GitHub URL required" >&2
-        usage
-        exit 1
+        error "GitHub URL required"
+        echo "Use --help for usage information" >&2
+        exit $E_INVALID_ARGS
     fi
 
     # Handle color option
@@ -268,16 +397,14 @@ parse_args() {
         never) 
             C_RESET='' C_BOLD='' C_DIR='' C_EXEC='' C_LINK='' 
             C_ARCHIVE='' C_IMAGE='' C_CODE='' C_SIZE='' C_TREE=''
+            C_ERROR='' C_WARN='' C_SUCCESS=''
             ;;
         auto)
             if [[ ! -t 1 ]] || [[ "${NO_COLOR:-}" == "1" ]]; then
                 C_RESET='' C_BOLD='' C_DIR='' C_EXEC='' C_LINK='' 
                 C_ARCHIVE='' C_IMAGE='' C_CODE='' C_SIZE='' C_TREE=''
+                C_ERROR='' C_WARN='' C_SUCCESS=''
             fi
-            ;;
-        *)
-            echo "Error: Invalid color option: $COLOR" >&2
-            exit 1
             ;;
     esac
 }
@@ -293,14 +420,15 @@ progress() {
 size_to_bytes() {
     local size=$1
     local num=${size%[KMGT]B}
+    num=${num%[KMGT]}  # Handle shorthand without B
     local unit=${size##*[0-9.]}
     
     case $unit in
-        K|KB) echo "$((num * 1024))" ;;
-        M|MB) echo "$((num * 1024 * 1024))" ;;
-        G|GB) echo "$((num * 1024 * 1024 * 1024))" ;;
-        T|TB) echo "$((num * 1024 * 1024 * 1024 * 1024))" ;;
-        B|"") echo "$num" ;;
+        K|KB) echo "$((${num%.*} * 1024))" ;;
+        M|MB) echo "$((${num%.*} * 1024 * 1024))" ;;
+        G|GB) echo "$((${num%.*} * 1024 * 1024 * 1024))" ;;
+        T|TB) echo "$((${num%.*} * 1024 * 1024 * 1024 * 1024))" ;;
+        B|"") echo "${num%.*}" ;;
         *) echo "0" ;;
     esac
 }
@@ -308,16 +436,31 @@ size_to_bytes() {
 # Format bytes to human readable
 format_size() {
     local bytes=$1
-    if [[ $bytes -gt 1099511627776 ]]; then
-        printf "%.1fT" "$(echo "scale=1; $bytes / 1099511627776" | bc)"
-    elif [[ $bytes -gt 1073741824 ]]; then
-        printf "%.1fG" "$(echo "scale=1; $bytes / 1073741824" | bc)"
-    elif [[ $bytes -gt 1048576 ]]; then
-        printf "%.1fM" "$(echo "scale=1; $bytes / 1048576" | bc)"
-    elif [[ $bytes -gt 1024 ]]; then
-        printf "%.1fK" "$(echo "scale=1; $bytes / 1024" | bc)"
+    if command -v bc >/dev/null 2>&1; then
+        if [[ $bytes -gt 1099511627776 ]]; then
+            printf "%.1fT" "$(echo "scale=1; $bytes / 1099511627776" | bc)"
+        elif [[ $bytes -gt 1073741824 ]]; then
+            printf "%.1fG" "$(echo "scale=1; $bytes / 1073741824" | bc)"
+        elif [[ $bytes -gt 1048576 ]]; then
+            printf "%.1fM" "$(echo "scale=1; $bytes / 1048576" | bc)"
+        elif [[ $bytes -gt 1024 ]]; then
+            printf "%.1fK" "$(echo "scale=1; $bytes / 1024" | bc)"
+        else
+            printf "%dB" "$bytes"
+        fi
     else
-        printf "%dB" "$bytes"
+        # Fallback without bc
+        if [[ $bytes -gt 1099511627776 ]]; then
+            printf "%dT" "$((bytes / 1099511627776))"
+        elif [[ $bytes -gt 1073741824 ]]; then
+            printf "%dG" "$((bytes / 1073741824))"
+        elif [[ $bytes -gt 1048576 ]]; then
+            printf "%dM" "$((bytes / 1048576))"
+        elif [[ $bytes -gt 1024 ]]; then
+            printf "%dK" "$((bytes / 1024))"
+        else
+            printf "%dB" "$bytes"
+        fi
     fi
 }
 
@@ -374,32 +517,56 @@ clone_repo() {
     local target_dir="$repo_name"
     
     if [[ "$USE_CACHE" == "true" ]]; then
-        mkdir -p "$CACHE_DIR"
+        mkdir -p "$CACHE_DIR" || die "Cannot create cache directory: $CACHE_DIR" $E_PERMISSION_ERROR
         target_dir="$CACHE_DIR/$repo_name"
     fi
     
     if [[ "$CLEAR_CACHE" == "true" ]] && [[ -d "$target_dir" ]]; then
         progress "Clearing cache for $repo_name"
-        rm -rf "$target_dir"
+        rm -rf "$target_dir" || warn "Could not clear cache directory"
     fi
     
     if [[ ! -d "$target_dir" ]]; then
         progress "Cloning $url..."
+        
+        # Check network before cloning
+        if ! check_network; then
+            die "Cannot reach GitHub. Check your internet connection." $E_NETWORK_ERROR
+        fi
+        
         local clone_cmd="git clone --quiet"
         if [[ -n "$GITHUB_TOKEN" ]]; then
             url=$(echo "$url" | sed "s|https://|https://${GITHUB_TOKEN}@|")
         fi
-        $clone_cmd "$url" "$target_dir" 2>&1 | while read -r line; do
-            [[ "$VERBOSE" == "true" ]] && echo "$line" >&2
-        done
+        
+        # Clone with error handling
+        local clone_output
+        if clone_output=$($clone_cmd "$url" "$target_dir" 2>&1); then
+            success "Repository cloned successfully"
+        else
+            # Parse git error messages
+            if [[ "$clone_output" =~ "Repository not found" ]]; then
+                die "Repository not found. Check the URL or authentication." $E_GIT_ERROR
+            elif [[ "$clone_output" =~ "Authentication failed" ]]; then
+                die "Authentication failed. Use --auth with a valid GitHub token for private repos." $E_GIT_ERROR
+            elif [[ "$clone_output" =~ "Could not resolve host" ]]; then
+                die "Network error: Could not resolve host. Check your internet connection." $E_NETWORK_ERROR
+            else
+                die "Git clone failed: $clone_output" $E_GIT_ERROR
+            fi
+        fi
     else
         progress "Using existing repository: $repo_name"
         if [[ "$USE_CACHE" == "true" ]]; then
             progress "Updating cached repository..."
-            (cd "$target_dir" && git pull --quiet 2>&1) | while read -r line; do
-                [[ "$VERBOSE" == "true" ]] && echo "$line" >&2
-            done
+            if ! (cd "$target_dir" && git pull --quiet 2>&1); then
+                warn "Could not update repository. Using cached version."
+            fi
         fi
+    fi
+    
+    if [[ ! -d "$target_dir" ]]; then
+        die "Repository directory not found after clone" $E_UNKNOWN_ERROR
     fi
     
     echo "$target_dir"
@@ -408,6 +575,11 @@ clone_repo() {
 # Build file list with filtering
 build_file_list() {
     local dir=$1
+    
+    if [[ ! -d "$dir" ]]; then
+        die "Directory not found: $dir" $E_UNKNOWN_ERROR
+    fi
+    
     local find_cmd="find '$dir' -mindepth 1"
     
     # Add depth limit
@@ -455,7 +627,8 @@ build_file_list() {
         find_cmd="$find_cmd \\)"
     fi
     
-    # Execute find command
+    # Execute find command with error handling
+    local file_count=0
     eval "$find_cmd" 2>/dev/null | while read -r file; do
         # Skip if it's a directory and we're filtering by type
         if [[ -d "$file" ]] && [[ -n "$TYPE_FILTER" ]]; then
@@ -490,6 +663,12 @@ build_file_list() {
         
         # Output: path|size|mtime|type|icon
         echo "$file|$size|$mtime|$type|$icon"
+        ((file_count++))
+        
+        # Progress indicator for large repos
+        if [[ $((file_count % 1000)) -eq 0 ]]; then
+            progress "Processed $file_count files..."
+        fi
     done
 }
 
@@ -786,19 +965,37 @@ generate_stats_markdown() {
 
 # Main function
 main() {
+    # Check dependencies first
+    check_dependencies
+    
+    # Parse arguments
     parse_args "$@"
     
+    # Validate GitHub URL
+    progress "Validating GitHub URL..."
+    validate_github_url "$REPO_URL" >/dev/null
+    
     # Setup cache directory
-    mkdir -p "$CACHE_DIR"
-    mkdir -p "$(dirname "$CONFIG_FILE")"
+    if [[ "$USE_CACHE" == "true" ]] || [[ "$CLEAR_CACHE" == "true" ]]; then
+        CACHE_DIR="${GITTERBUGS_CACHE_DIR:-$CACHE_DIR}"
+        mkdir -p "$CACHE_DIR" || die "Cannot create cache directory: $CACHE_DIR" $E_PERMISSION_ERROR
+    fi
+    
+    mkdir -p "$(dirname "$CONFIG_FILE")" 2>/dev/null || true
     
     # Clone or update repository
     progress "Processing repository..."
-    local repo_dir=$(clone_repo "$REPO_URL")
+    local repo_dir
+    repo_dir=$(clone_repo "$REPO_URL") || exit $?
     
     # Build and sort file list
     progress "Building file tree..."
-    local file_list=$(build_file_list "$repo_dir" | sort_file_list)
+    local file_list
+    file_list=$(build_file_list "$repo_dir" | sort_file_list) || die "Failed to build file list" $E_UNKNOWN_ERROR
+    
+    if [[ -z "$file_list" ]]; then
+        warn "No files found matching the specified criteria"
+    fi
     
     # Generate output based on format
     local output=""
@@ -815,16 +1012,16 @@ main() {
         csv)
             output=$(echo "$file_list" | generate_csv "$repo_dir")
             ;;
-        *)
-            echo "Error: Unknown format: $FORMAT" >&2
-            exit 1
-            ;;
     esac
     
     # Output results
     if [[ -n "$OUTPUT_FILE" ]]; then
+        # Check if we can write to the output file
+        if ! touch "$OUTPUT_FILE" 2>/dev/null; then
+            die "Cannot write to output file: $OUTPUT_FILE" $E_PERMISSION_ERROR
+        fi
         echo "$output" > "$OUTPUT_FILE"
-        [[ "$QUIET" != "true" ]] && echo "Output saved to: $OUTPUT_FILE"
+        [[ "$QUIET" != "true" ]] && success "Output saved to: $OUTPUT_FILE"
     else
         echo "$output"
     fi
@@ -832,6 +1029,11 @@ main() {
     # Show statistics if requested
     if [[ "$SHOW_STATS" == "true" ]] && [[ "$FORMAT" == "tree" ]]; then
         echo "$file_list" | generate_stats
+    fi
+    
+    # Success message
+    if [[ "$QUIET" != "true" ]] && [[ -z "$OUTPUT_FILE" ]]; then
+        success "Tree generation complete!"
     fi
 }
 
